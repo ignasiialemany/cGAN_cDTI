@@ -4,82 +4,85 @@ import torch.optim as optim
 import yaml
 import numpy as np
 
-class Encoder(nn.Module):
-    def __init__(self, in_channel, features, kernel_size, stride, noise_dim):
+class Generator(nn.Module):
+    
+    def __init__(self, config):
         super().__init__()
-        self.layers = nn.ModuleList()
+        self.config = config        
+        self.encoder = Encoder(config["generator"]["in_channels"], config["generator"]["features"], 
+                               config["generator"]["kernel_size"], config["generator"]["stride"], 
+                               config["generator"]["noise_dim"], config["generator"]["padding"])
+        self.decoder = Decoder(config["generator"]["in_channels"],config["generator"]["features"], 
+                               config["generator"]["kernel_size"], config["generator"]["stride"],
+                               config["generator"]["noise_dim"], config["generator"]["padding"])
+        
+    def forward(self, x, z):
+        x, skip_connections = self.encoder(x, z)
+        x = self.decoder(x, skip_connections)
+        return x
+    
+class Encoder(nn.Module):
+    def __init__(self, in_channel, features, kernel_size, stride, noise_dim, padding):
+        super().__init__()
+        self.encoder_blocks = nn.ModuleList()
+        self.features = features
+        self.noise_dim = noise_dim
+        #1-64 block, 64-128 block, 128-256 block, 256-512 block
         for i in range(len(features)):
-            self.layers.append(nn.Conv2d(in_channel, features[i], kernel_size, stride))
+            layers = []
+            layers.append(nn.Conv2d(in_channel, features[i], kernel_size, stride, padding))
+            #Only to first block
             if i > 0:
-                self.layers.append(nn.BatchNorm2d(features[i]))
-            self.layers.append(nn.LeakyReLU(0.2))
+                layers.append(nn.BatchNorm2d(features[i]))
+            layers.append(nn.LeakyReLU(0.2))
             in_channel = features[i]
-        self.noise_processor = nn.Linear(noise_dim, 30*30*128)
+            self.encoder_blocks.append(nn.Sequential(*layers))
+        self.noise_processor = nn.Linear(noise_dim, self.features[0]//2*self.features[0]//2*noise_dim)
         
     def forward(self, x, z):
         skip_connections = []
-        for layer in self.layers:
-            x = layer(x)
-            if isinstance(layer, nn.Conv2d):
-                skip_connections.append(x)
+        for i, block in enumerate(self.encoder_blocks):
+            x = block(x)
+            skip_connections.append(x)
         z = self.noise_processor(z)
-        z = z.view(z.size(0), 128, 30, 30)
+        z = z.view(z.size(0), self.noise_dim, self.features[0]//2, self.features[0]//2)
         x = torch.cat([x, z], dim=1)
         return x, skip_connections
 
+
 class Decoder(nn.Module):
-    def __init__(self, features, kernel_size, stride, noise_dim):
+    def __init__(self, input_features, features, kernel_size, stride,noise_dim, padding):
         super().__init__()
-        self.layers = nn.ModuleList()
-        for i in range(len(features)):
-            self.layers.append(nn.ConvTranspose2d(features[i], features[i-1], kernel_size, stride))
-            
+        self.decoder_blocks = nn.ModuleList()
+        #512+noise_dim - 256 block, 
+        #512-256 block, 256-128 block, 128-64 block
+        for i in range (len(features)-1,0,-1):
+            layers = []
+            if i==len(features)-1:
+                layers.append(nn.ConvTranspose2d(features[i]+noise_dim, features[i-1], kernel_size, stride, padding))
+            else:
+                layers.append(nn.ConvTranspose2d(features[i]*2, features[i-1], kernel_size, stride, padding))                
+            layers.append(nn.BatchNorm2d(features[i-1]))
+            layers.append(nn.ReLU())
+            self.decoder_blocks.append(nn.Sequential(*layers))
         
+        self.decoder_blocks.append(nn.Sequential(
+            nn.ConvTranspose2d(features[0]*2, input_features, kernel_size, stride, padding),
+            nn.Tanh()
+        ))
+        
+        #512+noise_dim - 256 block, 256*2 - 128 block, 128*2 - 64 block, 64*2 - 1 block
+        #encoder 1-64 , 64-128, 128-256, 256-512
+        #skip connections: 64, 128, 256, 512
 
-
-
-class SheetletToCellsGenerator(nn.Module):
-    
-    def __init__(self, config):
+    def forward(self, x, skip_connections):
+        skip_connections = skip_connections[::-1]
+        x = self.decoder_blocks[0](x)
+        for i in range(1,len(self.decoder_blocks)):
+            x = torch.cat([x, skip_connections[i]], dim=1)
+            x = self.decoder_blocks[i](x)
+        return x
         
-        super().__init__()
-        self.config = config
-        
-        self.encoder = Encoder(config["encoder"]["in_channels"], config["encoder"]["features"], 
-                               config["encoder"]["kernel_size"], config["encoder"]["stride"], 
-                               config["encoder"]["noise_dim"])
-        
-        # self.noise_processor = nn.Linear(noise_dim, 25*25*128)
-                
-        # # Bottleneck (where features and noise combine)
-        # self.bottleneck = nn.Sequential(
-        #     nn.Conv2d(512+128, 512, 3, padding=1),
-        #     nn.BatchNorm2d(512),
-        #     nn.LeakyReLU(0.2)
-        # )
-        
-        # # Decoder (upsampling path)
-        # self.decoder = nn.Sequential(
-        #     nn.ConvTranspose2d(512, 256, 4, stride=2, padding=1),  # 25x25 → 50x50
-        #     nn.BatchNorm2d(256),
-        #     nn.ReLU(),
-        #     nn.ConvTranspose2d(256, 128, 4, stride=2, padding=1),  # 50x50 → 100x100
-        #     nn.BatchNorm2d(128),
-        #     nn.ReLU(),
-        #     nn.ConvTranspose2d(128, 64, 4, stride=2, padding=1),  # 100x100 → 200x200
-        #     nn.BatchNorm2d(64),
-        #     nn.ReLU(),
-        #     nn.ConvTranspose2d(64, 1, 4, stride=2, padding=1),  # 200x200 → 400x400
-        #     nn.Tanh()  # Output in range [-1, 1]
-        # )
-    
-    def forward(self, x):
-        # Encode the binary mask
-        features = self.encoder(x)
-        return features
-    
-    
-
 if __name__ == "__main__":
     
     def load_config(path):
@@ -89,10 +92,12 @@ if __name__ == "__main__":
     
     config = load_config("config.yaml")
     print(config)
-    print(config["encoder"])
-    generator = SheetletToCellsGenerator(config)
+    print(config["generator"])
+    generator = Generator(config)
     
     image = np.random.randint(0, 255, (1, 1, 512, 512))
+    z = np.random.randint(0, 100, (1, 128))
     image = torch.from_numpy(image).float()
-    features = generator(image)
+    z = torch.from_numpy(z).float()
+    features = generator(image,z)
     print(features.shape)
