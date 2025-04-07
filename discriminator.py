@@ -1,6 +1,8 @@
 import torch.nn as nn
 import torch.nn.functional as F
 import yaml
+import torch
+from utils import load_config
 
 class Discriminator(nn.Module):
     def __init__(self, config):
@@ -20,7 +22,6 @@ class Discriminator(nn.Module):
                 layers.append(nn.BatchNorm2d(self.features[i+1]))
             layers.append(nn.LeakyReLU(0.2, inplace=True))
             self.disc_blocks.append(nn.Sequential(*layers))
-        
         self.sigmoid = nn.Sigmoid()
         
         
@@ -30,4 +31,8 @@ class Discriminator(nn.Module):
         return self.sigmoid(x)
     
     
-    
+if __name__ == "__main__":
+    config = load_config("config.yaml")
+    discriminator = Discriminator(config)
+    x = torch.randn(1, 1, 256, 256)
+    print(discriminator(x).shape)
