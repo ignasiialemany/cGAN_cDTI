@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.optim as optim
 import yaml
 import numpy as np
+from utils import load_config
 
 class Generator(nn.Module):
     
@@ -85,19 +86,16 @@ class Decoder(nn.Module):
         
 if __name__ == "__main__":
     
-    def load_config(path):
-        with open(path, "r") as f:
-            config = yaml.safe_load(f)
-        return config
-    
     config = load_config("config.yaml")
     print(config)
     print(config["generator"])
     generator = Generator(config)
     
-    image = np.random.randint(0, 255, (1, 1, 512, 512))
-    z = np.random.randint(0, 100, (1, 128))
+    size = (1,1,512,512)
+    image = np.random.randint(0, 255, size)
+    z = np.random.randint(0, 100, (1, config["generator"]["noise_dim"]))
     image = torch.from_numpy(image).float()
     z = torch.from_numpy(z).float()
     features = generator(image,z)
+    assert features.shape == size
     print(features.shape)
