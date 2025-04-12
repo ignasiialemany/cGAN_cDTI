@@ -6,6 +6,21 @@ import numpy as np
 from utils import load_config
 import torch.nn.functional as F
 
+def init_weights(m, mean=0.0, std=0.02):
+    """Initialize network weights with Gaussian distribution."""
+    classname = m.__class__.__name__
+    if classname.find('Conv') != -1 or classname.find('ConvTranspose') != -1:
+        nn.init.normal_(m.weight.data, mean=mean, std=std)
+        if m.bias is not None:
+            nn.init.constant_(m.bias.data, 0)
+    elif classname.find('BatchNorm') != -1:
+        nn.init.normal_(m.weight.data, mean=1.0, std=std)
+        nn.init.constant_(m.bias.data, 0)
+    elif classname.find('Linear') != -1:
+        nn.init.normal_(m.weight.data, mean=mean, std=std)
+        if m.bias is not None:
+            nn.init.constant_(m.bias.data, 0)
+
 class Generator(nn.Module):
     
     def __init__(self, config):
@@ -18,11 +33,13 @@ class Generator(nn.Module):
                                config["generator"]["kernel_size"], config["generator"]["stride"],
                                config["generator"]["noise_dim"], config["generator"]["padding"])
         
-    def forward(self, x, z):
+        # Initialize weights with Gaussian distribution
+        self.apply(lambda m: init_weights(m, std=0.02))
+        
+    def forward(self, x):
         # Store the mask of white regions for attention
-        white_mask = (x > 0.8).float()  # Assuming white is close to 1.0
-        x, skip_connections = self.encoder(x, z)
-        x = self.decoder(x, skip_connections, white_mask)
+        x, skip_connections = self.encoder(x)
+        x = self.decoder(x, skip_connections)
         return x
     
 class Encoder(nn.Module):
@@ -30,8 +47,6 @@ class Encoder(nn.Module):
         super().__init__()
         self.encoder_blocks = nn.ModuleList()
         self.features = features
-        self.noise_dim = noise_dim
-        self.noise_injection = NoiseInjection()
         
         # 1-64 block, 64-128 block, 128-256 block, 256-512 block
         for i in range(len(features)):
@@ -50,24 +65,12 @@ class Encoder(nn.Module):
             layers.append(nn.LeakyReLU(0.2))
             self.encoder_blocks.append(nn.Sequential(*layers))
         
-        # Use more noise channels in latent space
-        self.noise_processor = nn.Sequential(
-            nn.Linear(noise_dim, self.features[0]//2*self.features[0]//2*noise_dim)
-        )
         
-    def forward(self, x, z):
+    def forward(self, x):
         skip_connections = []
         for i, block in enumerate(self.encoder_blocks):
             x = block(x)
-            # Add some noise at each level to encourage diversity
-            #if i > 0:
-                #x = self.noise_injection(x)
             skip_connections.append(x)
-        
-        # Process noise and make it more impactful
-        z = self.noise_processor(z)
-        z = z.view(z.size(0), self.noise_dim, self.features[0]//2, self.features[0]//2)
-        x = torch.cat([x, z], dim=1)
         return x, skip_connections
 
 
@@ -75,9 +78,6 @@ class Decoder(nn.Module):
     def __init__(self, input_features, features, kernel_size, stride, noise_dim, padding):
         super().__init__()
         self.decoder_blocks = nn.ModuleList()
-        self.attention_blocks = nn.ModuleList()
-        self.noise_dim = noise_dim
-        self.noise_injection = NoiseInjection()
         
         # 512+noise_dim - 256 block, 256-128 block, 128-64 block, 64-1 block
         for i in range(len(features)-1, 0, -1):
@@ -87,21 +87,22 @@ class Decoder(nn.Module):
             else:
                 layers.append(nn.ConvTranspose2d(features[i]*2, features[i-1], kernel_size, stride, padding))                
             layers.append(nn.BatchNorm2d(features[i-1]))
-            layers.append(nn.ReLU())
+            layers.append(nn.ReLU(inplace=True))
+            layers.append(nn.Dropout(0.6))
             #layers.append(nn.Dropout(0.05))
             self.decoder_blocks.append(nn.Sequential(*layers))
             
             # Add attention blocks
-            if i < len(features)-1:
-                self.attention_blocks.append(SpatialAttention(features[i-1]))
+            #if i < len(features)-1:
+                #self.attention_blocks.append(SpatialAttention(features[i-1]))
         
         # Final layer
         self.decoder_blocks.append(nn.Sequential(
             nn.ConvTranspose2d(features[0]*2, input_features, kernel_size, stride, padding),
-            nn.Tanh()
+            nn.Sigmoid()
         ))
         
-    def forward(self, x, skip_connections, white_mask=None):
+    def forward(self, x, skip_connections):
         skip_connections = skip_connections[::-1]
         x = self.decoder_blocks[0](x)
         
@@ -111,34 +112,8 @@ class Decoder(nn.Module):
             # Apply decoder block
             x = self.decoder_blocks[i](x)  
             # Normalize to [0,1]
-            x = (x+1)/2      
+            # x = (x+1)/2      
         return x
-
-
-class NoiseInjection(nn.Module):
-    def __init__(self, strength=0.05):
-        super().__init__()
-        self.strength = strength
-        
-    def forward(self, x):
-        if not self.training:
-            return x
-            
-        noise = torch.randn_like(x) * self.strength
-        return x + noise
-
-
-class SpatialAttention(nn.Module):
-    def __init__(self, in_channels):
-        super().__init__()
-        self.conv = nn.Conv2d(in_channels, in_channels, kernel_size=1)
-        self.gamma = nn.Parameter(torch.zeros(1))
-        
-    def forward(self, x):
-        # Simple self-attention mechanism
-        attention = torch.sigmoid(self.conv(x))
-        out = x * attention
-        return x + self.gamma * out
         
 if __name__ == "__main__":
     
@@ -147,11 +122,9 @@ if __name__ == "__main__":
     print(config["generator"])
     generator = Generator(config)
     
-    size = (5,1,512,512)
-    image = np.random.randint(0, 255, size)
-    z = np.random.randint(0, 100, (5, config["generator"]["noise_dim"]))
+    size = (5,1,256,256)
+    image = np.random.randint(0, 1, size)
     image = torch.from_numpy(image).float()
-    z = torch.from_numpy(z).float()
-    features = generator(image,z)
+    features = generator(image)
     assert features.shape == size
     print(features.shape)

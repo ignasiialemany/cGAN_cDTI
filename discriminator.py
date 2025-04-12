@@ -33,6 +33,6 @@ class Discriminator(nn.Module):
 if __name__ == "__main__":
     config = load_config("config.yaml")
     discriminator = Discriminator(config)
-    x = torch.randn(6, 1, 512, 512)
-    condition = torch.randn(6, 1, 512,512)
+    x = torch.randn(6, 1, 256, 256)
+    condition = torch.randn(6, 1, 256,256)
     print(discriminator(condition, x).shape)

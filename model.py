@@ -7,9 +7,10 @@ from generator import Generator  # your existing generator
 from discriminator import Discriminator  # your existing discriminator
 from utils import load_config
 import wandb
-
+import kornia
+import torch.nn.functional as F
 class GANModel(pl.LightningModule):
-    def __init__(self, config, lr=0.0002, beta1=0.5, beta2=0.999):
+    def __init__(self, config, lr_generator, lr_discriminator):
         self.config = config
         super().__init__()
         self.save_hyperparameters()
@@ -19,6 +20,8 @@ class GANModel(pl.LightningModule):
         #we load the generator and the discriminator here        
         self.generator = Generator(config)
         self.discriminator = Discriminator(config)
+        self.optimizer_generator = optim.Adam(self.generator.parameters(), lr=lr_generator)
+        self.optimizer_discriminator = optim.Adam(self.discriminator.parameters(), lr=lr_discriminator)
         
         self.adversarial_loss = nn.BCEWithLogitsLoss()
         self.l1_loss = nn.L1Loss()
@@ -33,106 +36,64 @@ class GANModel(pl.LightningModule):
         opt_g, opt_d = self.optimizers()
         
         condition, target = batch
-        
-        batch_size = condition.shape[0]
-        noise = torch.randn(batch_size, self.config["generator"]["noise_dim"], device=condition.device)
 
-        # Generator training step
-        opt_g.zero_grad()        
+        for _ in range(5):
+            # Generator training step
+            opt_g.zero_grad()        
+            
+            # Generate fake image
+            fake = self.generator(condition)
+            fake_pred = self.discriminator(condition, fake)
+            fake_labels = torch.zeros_like(fake_pred)
+            
+            g_loss_adv = self.adversarial_loss(fake_pred, fake_labels)
+            g_loss_l1 = self.l1_loss(fake, target) * 100
+            #similarity_penalty = -self.l1_loss(fake, condition) * 10  # Negative because we want to maximize difference
+            g_loss = g_loss_adv + g_loss_l1
+            
+            self.log("g_loss_l1", g_loss_l1, prog_bar=True)
+            self.log("g_loss_adv", g_loss_adv, prog_bar=True)
+            self.log("g_loss", g_loss, prog_bar=True)
+            
+            self.manual_backward(g_loss)
+            opt_g.step()
         
-        # Generate fake image
-        fake = self.generator(condition, noise)
-        
-        g_loss_l1 = self.l1_loss(fake, target)
-        g_loss = g_loss_l1
-        self.log("g_loss_l1", g_loss_l1, prog_bar=True)
-            
-        #fake_pred = self.discriminator(condition, fake)
-        
-        # Use adversarial loss with label smoothing
-        #real_labels = torch.ones_like(fake_pred).fill_(0.9)  # Use 0.9 instead of 1.0
-        #g_loss_adv = self.adversarial_loss(
-        #    fake_pred, real_labels
-        #)
-            
-        # Create a mask to focus more on white areas
-        #white_mask = (condition > 0.8).float()
-        # Calculate weighted L1 loss - more weight on white areas
-        #weighted_l1 = self.l1_loss(fake * white_mask * 2.0, target * white_mask * 2.0)
-        #regular_l1 = self.l1_loss(fake * (1 - white_mask), target * (1 - white_mask))
-        
-        # Reduce L1 weight from 100 to 30, more emphasis on white regions
-        #g_loss_l1 = (weighted_l1 * 2.0 + regular_l1) * 30
-            
-        #g_loss = g_loss_adv + g_loss_l1
-        
-        # Log losses
-        #self.log("g_loss", g_loss, prog_bar=True)
-        #self.log("g_loss_adv", g_loss_adv, prog_bar=True)
-        #self.log("g_loss_l1", g_loss_l1, prog_bar=True)
-            
-        self.manual_backward(g_loss)
-        opt_g.step()
-        
-        # Train discriminator twice for every generator step
-        # for _ in range(2):
-        #     opt_d.zero_grad()
-            
-        #     # Generate fake image
-        #     with torch.no_grad():
-        #         fake = self.generator(condition, noise)
-            
-        #     # Real loss with label smoothing
-        #     real_pred = self.discriminator(condition, target)
-        #     real_labels = torch.ones_like(real_pred).fill_(0.9)  # Use 0.9 instead of 1.0
-        #     d_loss_real = self.adversarial_loss(
-        #         real_pred, real_labels
-        #     )
-            
-        #     # Fake loss
-        #     fake_pred = self.discriminator(condition, fake.detach())
-        #     fake_labels = torch.zeros_like(fake_pred)
-        #     d_loss_fake = self.adversarial_loss(
-        #         fake_pred, fake_labels
-        #     )
-            
-        #     # Total discriminator loss
-        #     d_loss = (d_loss_real + d_loss_fake) * 0.5
-            
-        #     # Log losses
-        #     self.log("d_loss", d_loss, prog_bar=True)
-        #     self.manual_backward(d_loss)
-        #     opt_d.step()
+        for _ in range(1):
+            opt_d.zero_grad()
+            real_pred = self.discriminator(condition, target)
+            fake_pred = self.discriminator(condition, fake.detach())
+            real_labels = torch.ones_like(real_pred).fill_(0.95)
+            fake_labels = torch.zeros_like(fake_pred).fill_(0.05)
+            d_loss_real = self.adversarial_loss(real_pred, real_labels)
+            d_loss_fake = self.adversarial_loss(fake_pred, fake_labels)
+            d_loss = (d_loss_real + d_loss_fake) * 0.5
+            self.log("d_loss_real", d_loss_real, prog_bar=True)
+            self.log("d_loss_fake", d_loss_fake, prog_bar=True)
+            self.log("d_loss", d_loss, prog_bar=True)
+            self.manual_backward(d_loss)
+            opt_d.step()
         
             
     def validation_step(self, batch, batch_idx):
         condition, target = batch
         batch_size = condition.shape[0]
-        noise = torch.randn(batch_size, self.config["generator"]["noise_dim"], device=condition.device)
-        fake = self.generator(condition, noise)
+        fake = self.generator(condition)
+        fake_pred = self.discriminator(condition, fake)
         
-        val_loss = self.l1_loss(fake, target)
-        self.log("val_loss", val_loss, prog_bar=True)
+        fake_labels = torch.zeros_like(fake_pred)
+        g_loss_adv = self.adversarial_loss(fake_pred, fake_labels)
+        g_loss_l1 = self.l1_loss(fake, target)
+        g_loss = g_loss_adv + g_loss_l1 * 100
+        self.log("g_val_loss", g_loss, prog_bar=True)
         
-        # Validation losses
-        # fake_pred = self.discriminator(condition, fake)
-        # real_labels = torch.ones_like(fake_pred).fill_(0.9)
-        # g_loss_adv = self.adversarial_loss(
-        #     fake_pred, real_labels
-        # )
-        
-        # # Create a mask to focus more on white areas
-        # white_mask = (condition > 0.8).float()
-        # weighted_l1 = self.l1_loss(fake * white_mask * 2.0, target * white_mask * 2.0)
-        # regular_l1 = self.l1_loss(fake * (1 - white_mask), target * (1 - white_mask))
-        # g_loss_l1 = (weighted_l1 * 2.0 + regular_l1) * 30
-        
-        # g_loss = g_loss_adv + g_loss_l1
-        
-        # # Log validation losses
-        # self.log("val_g_loss", g_loss)
-        # self.log("val_l1_loss", g_loss_l1)
-        # self.log("val_adv_loss", g_loss_adv)
+        real_pred = self.discriminator(condition, target)
+        real_labels = torch.ones_like(real_pred).fill_(0.95)
+        d_loss_real = self.adversarial_loss(real_pred, real_labels)
+                
+        fake_labels = torch.zeros_like(fake_pred).fill_(0.05)
+        d_loss_fake = self.adversarial_loss(fake_pred, fake_labels)
+        d_loss = (d_loss_real + d_loss_fake) * 0.5
+        self.log("d_val_loss", d_loss, prog_bar=True)
         
         # Log images to wandb (every 20 validation steps)
         if batch_idx % 20 == 0:
@@ -154,18 +115,7 @@ class GANModel(pl.LightningModule):
             })
     
     def configure_optimizers(self):
-        opt_g = optim.Adam(
-            self.generator.parameters(),
-            lr=self.hparams.lr,
-            betas=(self.hparams.beta1, self.hparams.beta2)
-        )
-        opt_d = optim.Adam(
-            self.discriminator.parameters(),
-            lr=self.hparams.lr,
-            betas=(self.hparams.beta1, self.hparams.beta2)
-        )
-        
-        return [opt_g, opt_d], [] 
+        return [self.optimizer_generator, self.optimizer_discriminator], [] 
 
 
 
