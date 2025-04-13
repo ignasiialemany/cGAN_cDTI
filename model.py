@@ -9,6 +9,9 @@ from utils import load_config
 import wandb
 import kornia
 import torch.nn.functional as F
+from kornia.losses import ssim_loss
+
+
 class GANModel(pl.LightningModule):
     def __init__(self, config, lr_generator, lr_discriminator):
         self.config = config
@@ -25,7 +28,7 @@ class GANModel(pl.LightningModule):
         
         self.adversarial_loss = nn.BCEWithLogitsLoss()
         self.l1_loss = nn.L1Loss()
-        
+
     def forward(self, condition):
         batch_size = condition.shape[0]
         noise = torch.randn(batch_size, self.config["generator"]["noise_dim"], device=self.device)
@@ -37,22 +40,22 @@ class GANModel(pl.LightningModule):
         
         condition, target = batch
 
-        for _ in range(5):
+        for _ in range(3):
             # Generator training step
             opt_g.zero_grad()        
             
             # Generate fake image
             fake = self.generator(condition)
             fake_pred = self.discriminator(condition, fake)
-            fake_labels = torch.zeros_like(fake_pred)
-            
-            g_loss_adv = self.adversarial_loss(fake_pred, fake_labels)
-            g_loss_l1 = self.l1_loss(fake, target) * 100
-            #similarity_penalty = -self.l1_loss(fake, condition) * 10  # Negative because we want to maximize difference
-            g_loss = g_loss_adv + g_loss_l1
+            real_labels = torch.ones_like(fake_pred).fill_(0.98)            
+            g_loss_adv = self.adversarial_loss(fake_pred, real_labels)
+            g_loss_l1 = self.l1_loss(fake, target) * 70
+            g_loss_ssim = ssim_loss(fake,target, window_size=41,reduction="mean") * 2
+            g_loss = g_loss_adv + g_loss_l1 + g_loss_ssim
             
             self.log("g_loss_l1", g_loss_l1, prog_bar=True)
             self.log("g_loss_adv", g_loss_adv, prog_bar=True)
+            self.log("g_loss_ssim", g_loss_ssim, prog_bar=True)
             self.log("g_loss", g_loss, prog_bar=True)
             
             self.manual_backward(g_loss)
@@ -62,8 +65,8 @@ class GANModel(pl.LightningModule):
             opt_d.zero_grad()
             real_pred = self.discriminator(condition, target)
             fake_pred = self.discriminator(condition, fake.detach())
-            real_labels = torch.ones_like(real_pred).fill_(0.95)
-            fake_labels = torch.zeros_like(fake_pred).fill_(0.05)
+            real_labels = torch.ones_like(real_pred).fill_(0.98)
+            fake_labels = torch.zeros_like(fake_pred).fill_(0.02)
             d_loss_real = self.adversarial_loss(real_pred, real_labels)
             d_loss_fake = self.adversarial_loss(fake_pred, fake_labels)
             d_loss = (d_loss_real + d_loss_fake) * 0.5
@@ -77,20 +80,25 @@ class GANModel(pl.LightningModule):
     def validation_step(self, batch, batch_idx):
         condition, target = batch
         batch_size = condition.shape[0]
+        
         fake = self.generator(condition)
         fake_pred = self.discriminator(condition, fake)
-        
-        fake_labels = torch.zeros_like(fake_pred)
-        g_loss_adv = self.adversarial_loss(fake_pred, fake_labels)
-        g_loss_l1 = self.l1_loss(fake, target)
-        g_loss = g_loss_adv + g_loss_l1 * 100
+        #Generator loss
+        real_labels = torch.ones_like(fake_pred).fill_(0.98)
+        g_loss_adv = self.adversarial_loss(fake_pred, real_labels)
+        g_loss_l1 = self.l1_loss(fake, target) * 70
+        g_loss_ssim = ssim_loss(fake,target, window_size=41,reduction="mean") * 2
+        g_loss = g_loss_adv + g_loss_ssim + g_loss_l1
         self.log("g_val_loss", g_loss, prog_bar=True)
         
+        #Discriminator loss
+
         real_pred = self.discriminator(condition, target)
-        real_labels = torch.ones_like(real_pred).fill_(0.95)
+        real_labels = torch.ones_like(real_pred).fill_(0.98)
         d_loss_real = self.adversarial_loss(real_pred, real_labels)
-                
-        fake_labels = torch.zeros_like(fake_pred).fill_(0.05)
+
+        fake_pred = self.discriminator(condition, fake.detach())        
+        fake_labels = torch.zeros_like(fake_pred).fill_(0.02)
         d_loss_fake = self.adversarial_loss(fake_pred, fake_labels)
         d_loss = (d_loss_real + d_loss_fake) * 0.5
         self.log("d_val_loss", d_loss, prog_bar=True)
