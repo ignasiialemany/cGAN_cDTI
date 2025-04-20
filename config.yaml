@@ -1,10 +1,10 @@
 generator:
   in_channels: 1
-  features: [64, 128, 256, 512]
+  features: [64, 128, 256, 512, 512, 1024]
   kernel_size: 4
   stride: 2
   padding: 1
-  noise_dim: 128
+  noise_dim: 0
 
 discriminator:
   features: [2, 64, 128, 256, 512, 1]
